@@ -7,10 +7,13 @@ method, the result, and why it matters.
 ## Projects
 
 **[Market Risk: VaR Backtesting and GARCH Volatility](./var-backtesting-garch)**
-Backtested 99% and 95% VaR under EWMA and historical simulation across the 2008
-and 2020 crises, using Kupiec coverage and Christoffersen independence tests.
-Compared eight GARCH specifications on 26 years of S&P 500 returns.
-*R*
+Documented fat tails, negative skew and volatility clustering in daily equity
+returns using Jarque-Bera tests and squared-return ACFs. Backtested 99% and 95%
+VaR under EWMA and historical simulation across the 2008 and 2020 crises, using
+Kupiec coverage and Christoffersen independence tests. Compared eight GARCH
+specifications on 26 years of S&P 500 returns.
+*R, Quarto*
+
 
 **[Estimation Risk: Covariance Conditioning in Portfolio Construction](./portfolio-covariance-conditioning)**
 Built a rolling mean-variance optimiser for a 10-stock portfolio and diagnosed
