@@ -1,0 +1,589 @@
+---
+title: "Rolling Mean-Variance Portfolio Construction and Covariance Conditioning"
+author: "Tushar Chellamsetty"
+date: "August 2026"
+output:
+  pdf_document:
+    fig_caption: true
+    number_sections: false
+header-includes:
+- \usepackage{amsmath}
+- \usepackage{booktabs}
+editor_options:
+  markdown:
+    wrap: none
+---
+
+```{r setup, include=FALSE}
+# Packages
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center")
+library(knitr)
+library(quantmod)
+```
+
+# Question 1: Data Description
+
+```{r load-data, results='hide'}
+# download prices
+tickers <- c("AAPL","MSFT","NVDA","AMZN","GOOGL","V","COST","UNH","XOM","JNJ")
+getSymbols(c("^GSPC", tickers), from = "2015-08-01", to = "2025-12-31")
+
+# Column 6 is adjusted close
+prices <- merge(GSPC[, 6], AAPL[, 6], MSFT[, 6], NVDA[, 6], AMZN[, 6],
+                GOOGL[, 6], V[, 6], COST[, 6], UNH[, 6], XOM[, 6], JNJ[, 6])
+colnames(prices) <- c("SP500", tickers)
+
+#Missing values handled 
+keep <- rep(TRUE, dim(prices)[1])
+for (j in 1:ncol(prices)) {
+  keep <- keep & !is.na(as.vector(prices[, j]))
+}
+
+n_dropped <- sum(!keep)
+prices <- prices[keep, ]
+
+# Log-prices for the plot
+
+dates <- index(prices)
+lp    <- log(as.matrix(prices))
+ret   <- diff(log(as.matrix(prices[, tickers])))
+```
+
+```{r fig1, fig.cap="Log-prices of the S\\&P 500 and 10 selected constituent stocks.", fig.width=9, fig.height=5, out.width="95%"}
+# log-price plot
+cols <- c(1:6, 8, 1:4)
+ltys <- c(rep(1, 7), rep(3, 4))
+
+plot(dates, lp[, 1], type = "l", col = cols[1], lty = ltys[1],
+     ylim = c(min(lp), max(lp)),
+     xlab = "Date", ylab = "Log Closing Price",
+     main = "Log-Prices of the 10 Stocks and the S&P 500")
+for (j in 2:ncol(lp)) {
+  lines(dates, lp[, j], col = cols[j], lty = ltys[j])
+}
+legend("bottomright", colnames(lp), col = cols, lty = ltys,
+       ncol = 1, cex = 0.7)
+```
+
+The daily closing prices of ten S&P 500 constituents (Apple, Microsoft, Nvidia, Amazon,
+Alphabet, Visa, Costco, UnitedHealth, Exxon Mobil and Johnson & Johnson), together with the
+S&P 500 index, are downloaded from Yahoo Finance and adjusted closing prices are used throughout.
+
+Missing values are handled by complete-case deletion: any date on which one or more of the eleven series ( 10 stocks and S&P500 index price) has no recorded price is dropped in full, and no price is filled in. Filling forward instead, as in Chapter 3 of the lecture notes, records a zero return for a series on a day the others move, which pulls the estimated correlations towards zero and distorts the off-diagonal entries of the covariance matrix reported below. That fill is needed there because Chapter 3 aligns ten world indices traded on different exchanges, one of which is routinely closed while another trades. The eleven series here are the S&P 500 and ten of its own constituents, all US-listed on a single trading calendar, so a missing price would be an isolated data error rather than a structural absence, and dropping the date costs almost nothing while keeping every return an observed price change.
+
+The daily log-return of stock $j$ on day $t$ is the first difference of its log price,
+
+$$
+r_{j,t} = \log P_{j,t} - \log P_{j,t-1}
+$$
+
+where $P_{j,t}$ is the closing price of stock $j$ on day $t$.
+
+Figure 1 shows the log-prices trending upward with no constant mean and moving together over the
+decade; they are therefore non-stationary, and the analysis proceeds on the log-returns.
+
+## Condition Number of the Sample Covariance Matrix
+
+```{r corr-stats}
+#mean of the off-diagonal correlations
+mean_offdiag_cor <- function(R) {
+  C <- cor(R)
+  (sum(C) - ncol(C)) / (ncol(C)^2 - ncol(C))
+}
+```
+
+```{r condtable}
+
+# Condition number calculated
+condition_number <- function(S) {
+  ev <- abs(eigen(S, symmetric = TRUE, only.values = TRUE)$values)
+  max(ev) / min(ev)
+}
+
+# Calculated over 3 periods 
+windows <- c("10-year" = 2500, "5-year" = 1250, "1-year" = 250)
+nret    <- dim(ret)[1]
+
+cond_tab <- numeric(3)
+corr_tab <- numeric(3)
+for (i in 1:3)  {
+  R_win       <- ret[(nret - windows[i] + 1):nret, ]
+  cond_tab[i] <- condition_number(var(R_win))
+  corr_tab[i] <- mean_offdiag_cor(R_win)
+}
+
+# Direction across the windows
+cond_dir <- if (cond_tab[3] < cond_tab[1]) "falls" else
+            if (cond_tab[3] > cond_tab[1]) "rises" else "is roughly unchanged"
+
+# Var spread
+vars      <- diag(var(ret[(nret - windows[1] + 1):nret, ]))
+var_ratio <- max(vars) / min(vars)
+
+# Typical daily mean return
+recent    <- ret[(nret - 249):nret, ]
+mu_recent <- numeric(ncol(recent))
+for (j in 1:ncol(recent)) {
+  mu_recent[j] <- mean(recent[, j])
+}
+mu_daily <- abs(mean(mu_recent))
+
+# Condition-number table
+cond_out <- matrix(0, 3, 2)
+rownames(cond_out) <- names(windows)
+colnames(cond_out) <- c("Days", "Condition number")
+cond_out[, "Days"]             <- windows
+cond_out[, "Condition number"] <- round(cond_tab, 1)
+kable(cond_out, digits = c(0, 1),
+      caption = paste("Condition number of the sample covariance",
+                      "matrix of daily returns, by window."))
+```
+
+The condition number of a matrix $A$ is
+
+$$
+\mathrm{Cond}(A) = \frac{|\lambda|_{\max}(A)}{|\lambda|_{\min}(A)}
+$$
+
+where $|\lambda|_{\max}(A)$ and $|\lambda|_{\min}(A)$ are its largest and smallest absolute
+eigenvalues. It is computed over the past ten, five and one years, taking 250 trading days per year (Table 1).
+
+The condition numbers are `r round(cond_tab[1],1)`, `r round(cond_tab[2],1)` and
+`r round(cond_tab[3],1)` for the ten-, five- and one-year windows. A large condition number has two
+causes: the number of variables $p$ being close to the sample size $D$, and multicollinearity among
+the series. Here $p = `r ncol(ret)`$ is far below $D$ in every window ($p/D = `r round(ncol(ret)/windows[3],2)`$ even for the
+one-year window), so the dimension effect is negligible and the conditioning comes from the covariance
+structure. Two features of that structure matter. First, the ten stocks move together through a common
+market factor; their mean off-diagonal correlation is `r round(corr_tab[1],2)`,
+`r round(corr_tab[2],2)` and `r round(corr_tab[3],2)` over the three windows, moderate rather than
+large.Second, the individual return variances differ across the ten stocks by a factor of about
+`r round(var_ratio)` in the ten-year window, which also contributes to the eigenvalue spread.
+
+These moderate values matter for Question 2. Multicollinearity shrinks the smallest eigenvalues of the
+sample covariance, which in turn inflates the eigenvalues of its inverse, so a badly conditioned $S$
+would make $S^{-1}$, and any weight that depends on it, numerically unstable. Because the condition
+numbers here stay moderate, that instability does not arise at the window lengths used in Question 2.
+
+The condition number `r cond_dir` as the window shortens. Since $p/D$ stays tiny throughout, and is in
+fact largest in the one-year window where the condition number is smallest, this movement cannot be a
+sample-size effect; it instead reflects the changing correlation and variance structure of returns from
+one period to the next.
+
+# Question 2: Rolling-Window Mean-Variance Strategy
+
+Let $r_t$ be the vector of daily log-returns of the $p=10$ stocks on day $t$,
+
+$$
+r_t = (r_{1,t}, \dots, r_{p,t})^\top
+$$
+
+with mean vector $\mu$ and covariance matrix $\Sigma$.
+
+The strategy has four inputs: a warm-up time $t_0$, an estimation window length $D$, a holding period
+$I$, and a target-return tuning parameter $x$. Given these, it proceeds in the four steps below.
+
+```{r q2-engine}
+
+# Two-fund optimiser
+opt_portfolio <- function(mu, Sigma, mu_star) {
+  ones <- rep(1, length(mu))
+  Sinv <- solve(Sigma)
+
+  w_mv  <- (Sinv %*% ones) / as.numeric(t(ones) %*% Sinv %*% ones)
+  w_mkt <- (Sinv %*% mu)   / as.numeric(t(ones) %*% Sinv %*% mu)
+
+  den <- as.numeric(t(mu) %*% (w_mkt - w_mv))
+  a   <- (mu_star - as.numeric(t(mu) %*% w_mv)) / den
+
+  a <- if (den > 0) max(0, a) else min(0, a)
+
+  as.numeric((1 - a) * w_mv + a * w_mkt)
+}
+
+# Roll the strategy across the sample
+run_strategy <- function(R, x, t0, D, I) {
+  Tn  <- dim(R)[1]
+  reb <- seq(from = t0, to = Tn - 1, by = I)   
+  m   <- length(reb)
+
+  period_ret <- rep(0, m)
+  W          <- matrix(0, m, ncol(R))
+
+  for (k in 1:m) {
+    t <- reb[k]
+
+    # estimate mean returns and covariance from the past D days.
+    est <- R[(t - D + 1):t, ]
+    mu  <- numeric(ncol(est))
+    for (j in 1:ncol(est)) {
+      mu[j] <- mean(est[, j])
+    }
+    Sig <- var(est)
+
+    # weights for the target return
+    w <- opt_portfolio(mu, Sig, 0.01 + x * abs(mean(mu)))
+
+    #hold for I days
+    hold <- (t + 1):min(t + I, Tn)
+    simI <- numeric(ncol(R))
+    for (j in 1:ncol(R)) {
+      simI[j] <- exp(sum(R[hold, j])) - 1
+    }
+
+    #record return and weights
+    period_ret[k] <- sum(w * simI)
+    W[k, ]        <- w
+  }
+
+  # Annualised Sharpe ratio 
+  sharpe <- sqrt(250 / I) * mean(period_ret) / sqrt(var(period_ret))
+
+  # Average absolute weight change
+  total_change <- 0
+  for (k in 2:m) {
+    total_change <- total_change + sum(abs(W[k, ] - W[k - 1, ]))
+  }
+  avsachg <- total_change / m
+
+  list(sharpe = sharpe, avsachg = avsachg,
+       period_ret = period_ret, weights = W)
+}
+
+# Strategy inputs 
+x_val  <- 50     # target-return
+t0_val <- 550    # warm-up time 
+D_val  <- 250    # estimation window 
+I_val  <- 10     # holding period
+
+ex <- run_strategy(ret, x = x_val, t0 = t0_val, D = D_val, I = I_val)
+
+# First rebalance of this run,
+est1 <- ret[(t0_val - D_val + 1):t0_val, ]
+mu1  <- numeric(ncol(est1))
+for (j in 1:ncol(est1)) {
+  mu1[j] <- mean(est1[, j])
+}
+mustar1 <- 0.01 + x_val * abs(mean(mu1))   # target return
+w1 <- ex$weights[1, ]                      # weight vector 
+r1 <- ex$period_ret[1]                     # I-day portfolio return
+```
+
+### (i) Estimation window
+
+At each rebalance time $t$, starting from the warm-up time $t_0$, the sample mean $\hat\mu$ and the
+sample covariance matrix $\hat\Sigma$ of the ten stocks' returns are estimated from the window of length
+$D$ running from day $t-D+1$ to day $t$, which at the first rebalance is $t_0-D+1$ to $t_0$. These estimates are the inputs to
+step (ii).
+
+No risk-free asset is available, so a portfolio is a fully-invested weight vector $w$ whose entries sum
+to one,
+
+$$
+w^\top \mathbf 1 = 1
+$$
+
+where $\mathbf 1$ is the vector of ones.
+
+### (ii) Optimal portfolio weight
+
+For a target return $\mu^*$ the weight minimises portfolio variance subject to the budget and
+target-return constraints,
+\begin{equation}
+\min_{w}\; w^\top\Sigma w \quad\text{subject to}\quad w^\top\mathbf{1}=1,\ \ \mu^*\le w^\top\mu
+\end{equation}
+By the two-fund theorem the solution combines two portfolios,
+\begin{equation}
+w=(1-\alpha)\,w_{mv}+\alpha\,w_{mkt}
+\end{equation}
+\begin{equation}
+w_{mv}=\frac{\Sigma^{-1}\mathbf{1}}{\mathbf{1}^\top\Sigma^{-1}\mathbf{1}},\qquad
+w_{mkt}=\frac{\Sigma^{-1}\mu}{\mathbf{1}^\top\Sigma^{-1}\mu}
+\end{equation}
+\begin{equation}
+\alpha=\frac{\mu^*-\mu^\top w_{mv}}{\mu^\top(w_{mkt}-w_{mv})}
+\end{equation}
+where $w_{mv}$ is the minimum-variance portfolio, $w_{mkt}$ the market portfolio, and
+$\alpha\in\mathbb{R}$ the fraction of wealth placed in $w_{mkt}$.If $\mu^\top w_{mv}\ge\mu^*$ the
+minimum-variance portfolio already meets the target and $\alpha=0$; more generally $\alpha$ is truncated
+to $\max(0,\alpha)$ when $\mu^\top(w_{mkt}-w_{mv})>0$ and to $\min(0,\alpha)$ otherwise. The target return is
+\begin{equation}
+\mu^*=0.01+x\left\lvert\frac{1}{p}\sum_{j=1}^{p}\hat\mu_j\right\rvert
+\end{equation}
+with $x$ fixed across a run: the 1\% floor sets a lower bound and $x$ controls how far above it the
+target sits, a larger $x$ tilting $w$ further toward the market portfolio. In estimation $\mu,\Sigma$ are replaced by $\hat\mu,\hat\Sigma$.
+
+The target $\mu^*$ is measured on the same daily scale as the returns themselves, so the 1\% floor is a
+1\% daily target. That is large next to the stocks' mean daily returns, which are of order
+`r round(100*mu_daily,2)`\% per day over the recent window, : so the constraint binds by a wide margin at every rebalance. No position or leverage limit is imposed, so the
+optimiser meets the target with heavily leveraged long-short weights, and the entries of Table 2 should
+be read as multiples of one unit of capital. 
+
+### (iii) Investment and rolling
+
+One unit of money is split by $w$ and held for the next $I$ days. The $I$-day buy-and-hold return of
+stock $j$ is
+
+$$
+\rho_{j} = \exp\!\left(\sum_{s=t+1}^{t+I} r_{j,s}\right) - 1
+$$
+
+and the portfolio return over the period is
+
+$$
+R = w^\top\rho = \sum_{j=1}^{p} w_j\,\rho_{j}, \qquad \rho=(\rho_{1},\dots,\rho_{p})^\top
+$$
+
+This return and the weight vector $w$ are recorded, the window is then rolled forward $I$ days,
+$t\leftarrow t+I$, and the construction repeats. If fewer than $I$ days remain at the final rebalance,
+the return is taken over the days that are left, so the last period may be shorter than $I$. 
+At each rebalance the estimation window and the traded block are disjoint, so no future information
+enters the weights.
+
+### (iv) Annualised Sharpe ratio
+
+With $N$ realised period returns $R_1,\dots,R_N$, and taking 250 trading days per year, the annualised
+Sharpe ratio is
+\begin{equation}
+\mathrm{SR}=\sqrt{\frac{250}{I}}\;\frac{\bar R}{s_R},\qquad
+\bar R=\frac{1}{N}\sum_{k=1}^{N}R_k,\quad
+s_R=\sqrt{\frac{1}{N-1}\sum_{k=1}^{N}\bigl(R_k-\bar R\bigr)^2}
+\end{equation}
+This is calculated over the whole data period, using every $I$-day return recorded in (iii). A year
+contains $250/I$ investment periods, giving the annualising factor $\sqrt{250/I}$. No risk-free rate is
+subtracted, since no risk-free asset is available. 
+
+### Worked example: the first rebalance
+
+To make the four steps concrete, take the first rebalance of the example run, with inputs
+$x=`r x_val`$, $t_0=`r t0_val`$, $D=`r D_val`$ and $I=`r I_val`$:
+
+(i) the estimation window is the `r D_val` days ending at day `r t0_val`; over it the mean daily returns
+$\hat\mu$ range from about `r round(min(mu1),4)` to `r round(max(mu1),4)`, with $\hat\Sigma$ the
+$10\times10$ sample covariance matrix of those returns;
+
+
+(ii) with target $\mu^*=`r round(mustar1,3)`$, the optimiser returns the weight vector in the first row
+of Table 2, ranging from about `r round(min(w1),1)` to `r round(max(w1),1)`;
+
+(iii) holding those weights for the next `r I_val` days gives a period return of $R=`r round(r1,4)`$;
+
+(iv) repeating this over all `r length(ex$period_ret)` periods and annualising gives a
+Sharpe ratio of `r round(ex$sharpe,2)`.
+
+The window is then rolled forward and the same four steps repeat a further
+`r length(ex$period_ret) - 1` times.
+
+## Implementation and Result
+
+The strategy is coded as the function `run_strategy`, which takes the four inputs $x$, $t_0$, $D$ and
+$I$ as arguments, so any combination can be run by changing `x_val`, `t0_val`, `D_val` and `I_val` in the Appendix. It returns the annualised Sharpe ratio, the turnover, the period returns, and the matrix of portfolio weights.
+
+For the example inputs $x=`r x_val`$, $t_0=`r t0_val`$, $D=`r D_val`$ and $I=`r I_val`$, the strategy runs over
+$N=`r length(ex$period_ret)`$ periods. Its answer is an annualised Sharpe ratio of
+`r round(ex$sharpe,2)`, together with a `r nrow(ex$weights)` $\times$ `r ncol(ex$weights)` matrix of portfolio weights, one row
+per period and one column per stock; its first five rows are shown in Table 2.
+
+```{r q2-weights}
+# 1st 5 weight vectors
+w5 <- round(ex$weights[1:5, ], 2)
+colnames(w5) <- tickers
+kable(w5,
+      caption = paste0("Recorded portfolio weights for each stock over the first five I-day ",
+                       "periods of the example run (x = ", x_val, ", t0 = ", t0_val,
+                       ", D = ", D_val, ", I = ", I_val, ")."))
+```
+
+# Question 3: Sharpe Ratio versus Turnover
+
+## Turnover metric
+
+Writing $w_1,\dots,w_N$ for the weight vectors at the $N$ rebalances (one per period return $R_k$,
+so the same $N$ as in equation (6)), the average absolute change in weights is
+\begin{equation}
+\text{AvsAchg}=\frac{1}{N}\sum_{k=1}^{N-1}\lVert w_{k+1}-w_k\rVert_1
+\end{equation}
+where the $\ell_1$ norm sums the absolute entries of a vector,
+
+$$
+\lVert v\rVert_1 = \sum_{j=1}^{p} \lvert v_j\rvert
+$$
+
+A smaller AvsAchg is preferable for two reasons. First, each unit of
+$\lVert w_{k+1}-w_k\rVert_1$ is a change of position that has to be traded, and every trade carries a
+cost that the gross Sharpe ratio of equation (6) ignores, so a larger cumulative weight change erodes
+realised returns, and a large position may not be tradeable at the quoted price if the stock is not
+liquid enough to absorb it. Second, large weight changes indicate that the weights are chasing estimation noise
+in $\hat\mu$ and $\hat\Sigma$ rather than stable signal, so a low-turnover strategy is both cheaper to
+run and more stable.
+
+## Comparing the Sharpe ratios
+
+```{r q3-setup}
+# Parameter grid
+x_grid <- c(0, 10, 25, 50, 100, 200)
+D_grid <- c(60, 90, 125, 180, 250, 375, 500)
+I_grid <- c(5, 10)
+n_grid <- length(x_grid) * length(D_grid) * length(I_grid)
+```
+
+
+The strategy is run over a grid of $x\in\{`r paste(x_grid, collapse=",")`\}$,
+$D\in\{`r paste(D_grid, collapse=",")`\}$ and $I\in\{`r paste(I_grid, collapse=",")`\}$, giving
+`r n_grid` parameter combinations, and the annualised Sharpe ratio and AvsAchg are recorded for each.
+
+```{r q3-grid}
+
+
+grid <- matrix(0,n_grid, 5)
+colnames(grid) <- c("x", "D", "I", "Sharpe", "AvsAchg")
+
+i <- 0
+for (I in I_grid) {
+  for (D in D_grid) {
+    for (x in x_grid) {
+      i   <- i + 1
+      t0  <- 550
+      res <- run_strategy(ret, x, t0, D, I)
+
+      grid[i, "x"] <- x
+      grid[i, "D"] <- D
+      grid[i, "I"] <- I
+      grid[i, "Sharpe"]  <- res$sharpe
+      grid[i, "AvsAchg"] <- res$avsachg
+    }
+  }
+}
+
+#best by turnover-penalised Sharpe.
+obj  <- grid[, "Sharpe"] - 0.01 * grid[, "AvsAchg"]
+best <- grid[which(obj == max(obj))[1], ]
+
+# Sharpe ranges for the two holding periods, for the text.
+sr10 <- c(min(grid[grid[, "I"] == 10, "Sharpe"]),
+          max(grid[grid[, "I"] == 10, "Sharpe"]))
+sr5  <- c(min(grid[grid[, "I"] == 5, "Sharpe"]),
+          max(grid[grid[, "I"] == 5, "Sharpe"]))
+
+med10 <- median(grid[grid[, "I"] == 10, "Sharpe"])
+med5  <- median(grid[grid[, "I"] == 5,  "Sharpe"])
+
+# Effect of x at the winning D and I, and the peak within that slice.
+xe   <- grid[grid[, "D"] == best["D"] & grid[, "I"] == best["I"], ]
+s0   <- xe[xe[, "x"] == min(x_grid), "Sharpe"]
+s200 <- xe[xe[, "x"] == max(x_grid), "Sharpe"]
+a0   <- xe[xe[, "x"] == min(x_grid), "AvsAchg"]
+a200 <- xe[xe[, "x"] == max(x_grid), "AvsAchg"]
+xe_best <- xe[which(xe[, "Sharpe"] == max(xe[, "Sharpe"]))[1], ]
+
+sharpe_gap <- max(grid[, "Sharpe"]) - best["Sharpe"]
+
+# Which setting wins the balance under a few different trading costs.
+costs     <- c(0.005, 0.01, 0.02)
+pen_check <- rep("", length(costs))
+for (j in 1:length(costs)) {
+  objc <- grid[, "Sharpe"] - costs[j] * grid[, "AvsAchg"]
+  b    <- grid[which(objc == max(objc))[1], ]
+  pen_check[j] <- paste0("x=", b["x"], ", D=", b["D"], ", I=", b["I"])
+}
+
+pen_uniq <- unique(pen_check)
+
+# Ten highest-Sharpe rows, found by taking the maximum ten times over.
+ranked  <- grid[, "Sharpe"]
+top_ind <- numeric(10)
+for (k in 1:10) {
+  idx         <- which(ranked == max(ranked))[1]
+  top_ind[k]  <- idx
+  ranked[idx] <- -Inf
+}
+top <- grid[top_ind, c("x", "D", "I", "Sharpe", "AvsAchg")]
+
+kable(top, row.names = FALSE, digits = c(0, 0, 0, 2, 1),
+      caption = paste("The ten parameter combinations with the highest",
+                      "annualised Sharpe ratio, and their turnover",
+                      "(AvsAchg)."))
+
+de     <- grid[grid[, "x"] == best["x"] & grid[, "I"] == best["I"], ]
+de_min <- de[which(de[, "Sharpe"] == min(de[, "Sharpe"]))[1], ]
+de_max <- de[which(de[, "Sharpe"] == max(de[, "Sharpe"]))[1], ]
+
+
+```
+
+```{r fig.cap=paste0("Annualised Sharpe ratio against turnover across all ", nrow(grid), " settings; the chosen setting is marked in red."), fig.width=7, fig.height=5, out.width="70%"}
+# Sharpe versus turnover
+plot(grid[, "AvsAchg"], grid[, "Sharpe"],
+     xlab = "AvsAchg (Turnover)", ylab = "Annualised Sharpe Ratio",
+     main = "Annualised Sharpe Ratio vs Turnover")
+points(best["AvsAchg"], best["Sharpe"], col = "red", pch = 19)
+```
+
+The holding period makes little difference. In Figure 2 the $I=`r max(I_grid)`$ settings reach Sharpe
+ratios up to `r round(sr10[2],2)` against `r round(sr5[2],2)` for $I=`r min(I_grid)`$, but the medians
+across settings are `r round(med10,2)` and `r round(med5,2)` respectively, so neither dominates. The two
+groups overlap throughout rather than forming cleanly separated bands, and Table 3 contains settings of
+both kinds.
+
+Raising the target return, by contrast, buys almost no extra Sharpe. Holding $D=`r best["D"]`$ and $I=`r best["I"]`$ fixed,,
+the Sharpe ratio is not monotone in $x$: it peaks at $x=`r xe_best["x"]`$
+(`r round(xe_best["Sharpe"],2)`) at a turnover of `r round(xe_best["AvsAchg"],1)`, then falls back to
+`r round(s200,2)` at	at $x=`r max(x_grid)`$, while AvsAchg rises steeply from `r round(a0,1)` at $x=`r min(x_grid)`$ to
+`r round(a200,1)`. The best raw Sharpe therefore sits only marginally above the value of
+`r round(s0,2)` at $x=`r min(x_grid)`$, and buying it costs a large amount of extra trading.
+
+The estimation window matters most. At $x=`r best["x"]`$ and $I=`r best["I"]`$ the Sharpe ratio ranges
+from `r round(de_min["Sharpe"],2)` at $D=`r de_min["D"]`$ to `r round(de_max["Sharpe"],2)` at
+$D=`r de_max["D"]`$, and every setting in Table 3 shares that same window length. A longer window
+estimates $\hat\mu$ and $\hat\Sigma$ from more data and so reduces estimation error, but the framework
+assumes those quantities are constant over the window, which becomes less tenable the further back it
+reaches. The warm-up $t_0$ is held at 550 throughout so that every setting is evaluated over the same
+trading period.
+
+
+## Choosing a Sharpe/turnover balance
+
+The preferred setting maximises the Sharpe ratio penalised by turnover,
+
+$$
+\max_{x,\,D,\,I}\;\;\mathrm{Sharpe} - c\cdot\mathrm{AvsAchg}, \qquad c = 0.01
+$$
+
+where $c$ is the Sharpe ratio one is willing to give up per unit of turnover. Repeating the choice at
+per-unit costs of `r paste(costs, collapse=", ")` returns the same setting each time,
+`r pen_uniq[1]`, so it is not driven by the particular value of $c$.
+
+```{r q3-best}
+# Largest weight at x extremes
+t0b <- 550
+wmax0   <- max(abs(run_strategy(ret, min(x_grid), t0b, best["D"], best["I"])$weights))
+wmax200 <- max(abs(run_strategy(ret, max(x_grid), t0b, best["D"], best["I"])$weights))
+```
+
+This gives $x=`r best["x"]`$, $D=`r best["D"]`$ and $I=`r best["I"]`$, the red point in Figure 2, with a
+Sharpe ratio of `r round(best["Sharpe"],2)` at an AvsAchg of only `r round(best["AvsAchg"],1)`.Table 3 lists one setting with a marginally higher Sharpe ratio and several matching it at far greater turnover; the chosen setting; the chosen setting gives up
+only `r round(sharpe_gap,2)` of Sharpe against the highest in the grid, which is the better trade-off
+once trading costs are considered.
+
+The reason a low target return wins the balance is estimation error. Only the market fund uses the
+sample mean $\hat\mu$, the noisiest quantity to estimate, while the minimum-variance fund in (3)
+ignores it entirely.
+
+Raising $x$ loads more on the $\hat\mu$-dependent fund: the maximum absolute weight grows from about
+`r round(wmax0)` at $x=`r min(x_grid)`$ to over `r round(wmax200)` at $x=`r max(x_grid)`$, and turnover from `r round(a0,1)` to
+`r round(a200,1)`, yet the Sharpe ratio barely moves. AAmong the settings tested, $x=`r min(x_grid)`$ places the
+least weight on the noisy market fund, since $\alpha$ is smallest when the target is lowest.
+
+## Conclusion
+
+The setting $x=`r best["x"]`$, $D=`r best["D"]`$, $I=`r best["I"]`$ gives the best balance of
+risk-adjusted return and tradeability. The estimation window is the parameter that matters, performance
+improving sharply with $D$ up to `r best["D"]`; the holding period makes little difference, and raising
+the target return through $x$ adds large turnover for at most a marginal gain in Sharpe ratio.
+
+\newpage
+
+# Appendix: R Code
+
+```{r appendix, ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
