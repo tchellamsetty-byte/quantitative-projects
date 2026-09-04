@@ -1,0 +1,178 @@
+---
+title: "Stylised Facts of Equity Returns: ASML and McDonald's, 2019 to 2025"
+author: "Tushar Chellamsetty"
+date: "11 November 2025"
+format:
+  pdf:
+    geometry: margin=1in
+---
+
+# Introduction
+
+This document analyses two internationally recognised companies: ASML Holding NV, a semiconductor equipment manufacturer, and McDonald's Corporation, a global fast-food chain. Daily closing price data for both stocks was sourced from EODHD and covers January 2019 to November 2025.
+
+```{r}
+#| echo: false 
+rm(list = ls()) # Clear all objects
+# Load packages
+suppressPackageStartupMessages({
+library(eodhdR2)
+library(dplyr)
+library(zoo)
+library(lubridate)
+library(moments)
+library(tseries)
+library(car)
+})
+token = "68daf286d987c7.29680678"
+suppressMessages(set_token(token))
+
+# --- Only two stocks, as required ---
+tickers = c("ASML", "MCD")
+exchanges = c("US", "US")
+security_names = c("ASML" = "ASML Holding NV", "MCD" = "McDonald's Corporation")
+start_date = "2019-01-01"; end_date = "2025-11-01"
+
+#--- Seminar-style add_returns function ---
+add_returns = function(df) {
+  returns = diff(log(df$adjusted_close))
+  df = df[-1, ]
+  df$returns = returns
+  return(df)
+}
+
+#--- Download, calculate returns, store (seminar loop approach) ---
+data = list()
+for (i in seq_along(tickers)) {
+  ticker = tickers[i]
+  exchange = exchanges[i]
+  prices = suppressMessages(get_prices(ticker, exchange))
+  prices = prices[order(prices$date), ]
+  prices$ticker = ticker
+  data[[ticker]] = add_returns(prices)
+}
+
+#--- Align dates robustly (matching Dates section in seminar code) ---
+reference_dates = data[[tickers[1]]]$date
+Prices  = data.frame(date = reference_dates)
+Returns = data.frame(date = reference_dates)
+for (ticker in tickers) {
+  ticker_data = data[[ticker]]
+  Prices[[ticker]]  = ticker_data$adjusted_close[match(reference_dates, ticker_data$date)]
+  Returns[[ticker]] = ticker_data$returns[match(reference_dates, ticker_data$date)]
+}
+#--- Restrict to your sample period (Jan 2019 – Nov 2025) ---
+Prices  = Prices[Prices$date >= ymd(start_date) & Prices$date <= ymd(end_date), ]
+Returns = Returns[Returns$date >= ymd(start_date) & Returns$date <= ymd(end_date), ]
+#--- Normalised Prices ---
+NormalisedPrices = data.frame(date = Prices$date)
+for (ticker in tickers) {
+  NormalisedPrices[[ticker]] = Prices[[ticker]] / Prices[[ticker]][1]
+}
+
+#--- Major financial event date annotations (2019–2025, fully up-to-date) ---
+event_dates = c(
+  "2019-05-10",  # Trump Tariffs (US-China escalation)
+  "2020-03-16",  # COVID crash
+  "2022-06-15",  # US Fed jumbo rate hike (inflation shock)
+  "2022-11-10",  # US CPI big surprise rally
+  "2023-03-10",  # SVB Crisis/banking panic
+  "2025-04-05"   # Trump Tariffs v2.0 ("Liberation Day")
+)
+event_labels = c(
+  "Trump Tariffs 2019",
+  "COVID Crash",
+  "Fed Hike/Inflation",
+  "US CPI Relief",
+  "SVB Crisis",
+  "Trump Tariffs 2025"
+)
+```
+
+# Figures and Results
+
+```{r, fig.width= 8, fig.height= 3, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow = c(1,2), mar=c(4.2,3.7,2,1))
+matplot(NormalisedPrices$date, NormalisedPrices[, tickers],
+        type="l", lty=1, lwd=1, ylab="", xlab="Date",
+        main="Figure 1a. Normalised prices", cex.main=0.65,
+        col=c("blue","red"))
+legend("topleft", legend=security_names, col=c("blue","red"),
+       lty=1, lwd=1, bty='n', cex=0.5)
+for (i in seq_along(event_dates)) {
+  abline(v = ymd(event_dates[i]), col = "gray60", lwd = 1, lty = 2)
+  text(x = ymd(event_dates[i]), y = max(NormalisedPrices[,2], na.rm=TRUE),
+       labels = event_labels[i], col = 'gray40', pos = 2, cex=0.32, srt=90, offset=0.32)
+}
+
+matplot(Returns$date, Returns[, tickers],
+        type="l", lty=1, lwd=1, ylab="", xlab="Date",
+        main="Figure 2. Log returns", cex.main=0.65,
+        col=c("blue","red"))
+legend("topleft", legend=security_names, col=c("blue","red"),
+       lty=1, lwd=1, bty='n', cex=0.5)
+for (i in seq_along(event_dates)) {
+  abline(v = ymd(event_dates[i]), col = "gray60", lwd = 1, lty = 2)
+  text(x = ymd(event_dates[i]), y = max(Returns[,2], na.rm=TRUE),
+       labels = event_labels[i], col = 'gray40', pos = 2, cex=0.32, srt=90, offset=0.32)
+}
+par(mfrow = c(1,1))
+
+```
+
+Figure 1 shows ASML is more event-sensitive than McDonald's, with sharp drops and recoveries around major financial events. McDonald's maintains a steadier upward trend with only occasional brief dips. Both stocks fell sharply in March 2020 during the COVID-19 pandemic. ASML Holding NV then rises much more quickly, especially during periods of optimism in tech markets, but also drops sharply around episodes like trade tariffs (2019 and 2025), rising inflation and interest rates (2022), and the SVB banking crisis (2023).
+
+Figure 2 shows that both stocks experience sharp spikes in returns during major market events, with ASML Holding NV exhibiting prolonged volatility clustering after such shocks. In contrast, McDonald’s Corporation returns remain close to zero and quickly stabilise. Both stocks occasionally display extreme negative returns, evidencing the persistent “fat tails” and event-driven nature of real-world volatility, even for defensive stocks like McDonald’s.
+
+# Sample Statistics
+
+```{r}
+#| echo: false
+# Collect summary statistics for daily returns and format to 3 significant figures
+stat_list <- list()
+sigfig <- function(x, n=3) formatC(x, digits=n, format="fg", flag="#")
+for (ticker in tickers) {
+  y <- Returns[[ticker]]
+  stat_list[[ticker]] <- c(
+    Mean     = sigfig(mean(y, na.rm=TRUE), 3),
+    StdDev   = sigfig(sd(y, na.rm=TRUE), 3),
+    Minimum  = sigfig(min(y, na.rm=TRUE), 3),
+    Maximum  = sigfig(max(y, na.rm=TRUE), 3),
+    Skewness = sigfig(skewness(y, na.rm=TRUE), 3),
+    Kurtosis = sigfig(kurtosis(y, na.rm=TRUE), 3),
+    JB.pvalue = sigfig(jarque.bera.test(y)$p.value, 3)
+  )
+}
+stats_df <- data.frame(
+  Ticker = tickers,
+  Mean = unlist(lapply(stat_list, function(x) x["Mean"])),
+  StdDev = unlist(lapply(stat_list, function(x) x["StdDev"])),
+  Minimum = unlist(lapply(stat_list, function(x) x["Minimum"])),
+  Maximum = unlist(lapply(stat_list, function(x) x["Maximum"])),
+  Skewness = unlist(lapply(stat_list, function(x) x["Skewness"])),
+  Kurtosis = unlist(lapply(stat_list, function(x) x["Kurtosis"])),
+  JB.pvalue = unlist(lapply(stat_list, function(x) x["JB.pvalue"]))
+)
+# Remove row names and print
+rownames(stats_df) <- NULL
+stats_df_short <- stats_df[, c("Ticker","Mean","StdDev","Skewness","Kurtosis")]
+knitr::kable(stats_df_short, digits=3, caption=" Sample statistics for daily log returns.")
+```
+
+Table 1 shows that ASML Holding NV has a higher mean return than McDonald’s Corporation, but also a much larger standard deviation (unconditional volatility). ASML’s returns are more negatively skewed and have higher kurtosis, indicating a greater risk of extreme negative outcomes and “fat tails”. Both stocks have Jarque-Bera p-values of zero, confirming their returns are far from normally distributed. By contrast, McDonald’s has even more pronounced kurtosis (35.7), reflecting rare but very large outliers.
+
+# Volatility and Correlation
+
+```{r, fig.width= 6, fig.height= 2.5, echo=FALSE, message=FALSE, warning=FALSE}
+#| echo: false
+par(mfrow = c(1,2), mar = c(4,4,3,1))
+acf(Returns[["ASML"]]^2, main = "Figure 3.a: ASML", cex.main=0.4)
+acf(Returns[["MCD"]]^2, main = "Figure 3.b: McDonald's", cex.main=0.4)
+par(mfrow = c(1,1))
+```
+
+Figure 3 presents ACFs of squared returns, revealing that both ASML Holding NV and McDonald’s Corporation exhibit significant and persistent positive autocorrelation, indicating strong volatility clustering. The effect is more pronounced and enduring for ASML, but McDonald’s also shows clear clustering across several lags. The correlation between ASML and McDonald’s is low in typical periods but spikes temporarily during systemic crises as both experience heightened risk simultaneously.
+
+# Recommendation
+
+Evidence from Table 1 and Figures 2 and 3 shows that ASML Holding NV provides higher average returns than McDonald’s Corporation, but with greater and more sustained risk. ASML suits investors with higher risk appetite in stable markets, while McDonald’s enhances portfolio stability when volatility rises in adverse markets. Portfolio weights should shift towards ASML when volatility and autocorrelation are low, and towards McDonald’s when risk intensifies, ensuring alignment with market dynamics and investor objectives.

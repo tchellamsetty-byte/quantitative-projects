@@ -1,0 +1,403 @@
+---
+title: "VaR Backtesting under EWMA and Historical Simulation"
+author: "Tushar Chellamsetty"
+date: "August 2026"
+output:
+  pdf_document:
+    number_sections: true
+    toc: false
+    fig_caption: true
+geometry: margin=1in
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, warning = FALSE, message = FALSE,
+  fig.align = "center", fig.width = 7, fig.height = 4,
+  dev = "png", dpi = 200, fig.crop = FALSE
+)
+```
+
+```{r parameters, include=FALSE}
+WE <- 300
+
+start_date <- as.Date("2008-01-01")
+end_date   <- as.Date("2026-06-30")   
+lambda     <- 0.94                   
+```
+
+# Introduction
+
+This report backtests Exponentially Weighted Moving Average (EWMA) and Historical Simulation (HS) Value-at-Risk (VaR) on an equal-weighted portfolio of Apple Inc. (AAPL),
+JPMorgan Chase & Co. (JPM) and Exxon Mobil Corporation (XOM), spanning technology, financials and energy. Both models generate daily 99% and 95% VaR forecasts, which are formally backtested to assess their statistical accuracy for daily market-risk monitoring and regulatory capital calculation.
+
+# Data
+
+Daily adjusted closing prices for AAPL, JPM and XOM are sourced from Yahoo Finance via the `quantmod` package in R, from `r format(start_date, "%d %B %Y")` to `r format(end_date, "%d %B %Y")`. This period spans the 2008 Global Financial Crisis and
+the 2020 COVID-19 shock, making it a demanding sample for VaR backtesting. Prices are converted to daily log returns, and an equal-weighted portfolio (1/3 in each asset) is
+formed for simplicity and transparency.
+
+```{r setup-packages, include=FALSE}
+library(quantmod)
+library(xts)
+library(zoo)
+library(knitr)
+set.seed(1)
+options(getSymbols.warning4.0 = FALSE)
+```
+
+```{r download-data, include=FALSE}
+tickers <- c("AAPL", "JPM", "XOM")   # Tech, Financials, Energy
+
+getSymbols(tickers, src = "yahoo", from = start_date, to = end_date,
+           auto.assign = TRUE)
+
+prices <- do.call(merge, lapply(tickers, function(tk) Ad(get(tk))))
+colnames(prices) <- tickers
+prices <- na.omit(prices)
+
+write.csv(data.frame(Date = index(prices), coredata(prices)),
+          "data_used.csv", row.names = FALSE)
+```
+
+```{r log-returns, include=FALSE}
+rets <- na.omit(diff(log(prices)))
+```
+
+```{r portfolio-construction, include=FALSE}
+w <- rep(1 / length(tickers), length(tickers))
+portfolio_ret <- xts(as.numeric(rets %*% w), order.by = index(rets))
+colnames(portfolio_ret) <- "Portfolio"
+
+sd_port       <- sd(as.numeric(portfolio_ret))
+sd_assets_avg <- mean(sapply(as.data.frame(rets), sd))
+sd_reduction  <- 100 * (1 - sd_port / sd_assets_avg)
+
+cor_lt  <- cor(rets)[lower.tri(cor(rets))]
+cor_min <- min(cor_lt)
+cor_max <- max(cor_lt)
+```
+
+All three pairs of assets are positively but imperfectly correlated, with pairwise correlations between `r sprintf("%.2f", cor_min)` and `r sprintf("%.2f", cor_max)`, and
+the diversification this delivers in the body of the distribution is substantial: the equal-weighted portfolio has a standard deviation of `r sprintf("%.4f", sd_port)`
+against an average individual standard deviation of `r sprintf("%.4f", sd_assets_avg)`, a reduction of `r sprintf("%.1f", sd_reduction)`%. Whether that benefit survives into the tail, where VaR is measured, is a separate question, and the descriptive statistics in Table 1 bear
+directly on it.
+
+Figure 1 plots the portfolio return series against the normal distribution. The tails depart from the reference line in both directions and by a wide margin, which is
+confirmed numerically in Table 1, where kurtosis for all three assets and for the portfolio is well above the value of 3 implied by normality. The portfolio is plotted in preference to the individual assets because it is the series both models are fitted to.
+
+```{r portfolio-qq, include=TRUE, fig.cap="QQ-plot of daily portfolio returns against the normal distribution.", fig.height=2.8, fig.width=4.5, out.width="45%"}
+qqnorm(as.numeric(portfolio_ret), main = "QQ-plot: equal-weighted portfolio")
+qqline(as.numeric(portfolio_ret), col = "red")
+```
+
+```{r desc-stats, include=TRUE}
+desc_stats <- function(x) {
+  c(mean = mean(x), sd = sd(x),
+    skewness = mean((x - mean(x))^3) / sd(x)^3,
+    kurtosis = mean((x - mean(x))^4) / sd(x)^4)
+}
+
+stats_table <- cbind(
+  sapply(as.data.frame(rets), desc_stats),
+  Portfolio = desc_stats(as.numeric(portfolio_ret))
+)
+
+## values used inline in the text
+kurt_port       <- unname(stats_table["kurtosis", "Portfolio"])
+skew_port       <- unname(stats_table["skewness", "Portfolio"])
+kurt_assets_avg <- mean(stats_table["kurtosis", tickers])
+
+## format
+kable(round(stats_table, 4), booktabs = TRUE,
+      caption = "Descriptive statistics of daily log returns.")
+```
+
+Portfolio kurtosis of `r sprintf("%.2f", kurt_port)` exceeds that of AAPL and XOM individually. Averaging has reduced standard deviation by a fifth without thinning the tail, so the diversification benefit is a property of the body of the distribution and does not carry into the region VaR is designed to measure.
+
+```{r ljung-box, include=FALSE}
+## Evidence for the volatility-clustering claim below.
+lb_ret <- Box.test(as.numeric(portfolio_ret),   lag = 20, type = "Ljung-Box")
+lb_sq  <- Box.test(as.numeric(portfolio_ret)^2, lag = 20, type = "Ljung-Box")
+lb_ratio <- as.numeric(lb_sq$statistic / lb_ret$statistic)
+n_obs    <- length(portfolio_ret)
+```
+
+A Ljung-Box test on 20 lags rejects at the 5% level for both returns and squared returns, with statistics of `r sprintf("%.1f", lb_ret$statistic)` and `r sprintf("%.1f", lb_sq$statistic)` respectively against a critical value of `r sprintf("%.1f", qchisq(0.95, 20))`. With `r format(n_obs, big.mark = ",")` observations the test has power to detect autocorrelation far too small to trade on, so the informative comparison is between the two statistics rather than between either and its critical value: the squared-return statistic is `r sprintf("%.0f", lb_ratio)` times
+as large. This is the classic signature of volatility clustering, in which the direction of a return is close to unpredictable while the *size* of a return tends to resemble its recent history. It motivates the EWMA and HS models below, both of which adapt their risk estimate to recent volatility.
+
+# Methodology
+
+Two VaR models are fitted to the portfolio return series. **EWMA VaR** updates conditional variance recursively as $\sigma_t^2 = \lambda \sigma_{t-1}^2 + (1-\lambda) r_{t-1}^2$, using the RiskMetrics decay factor $\lambda = `r lambda`$, and computes VaR under conditional normality as $\text{VaR}_t = -z_\alpha \sigma_t \vartheta$, where $\vartheta$ is the portfolio value; VaR is reported per unit of portfolio value throughout ($\vartheta = 1$), so all figures are in return units. **Historical Simulation
+(HS) VaR** instead takes the empirical $\alpha$-quantile of the trailing `r WE` trading days of realised portfolio returns, with no distributional assumption.
+
+Both models are run at the 99% and 95% levels. The first `r WE` observations are reserved for the HS estimation window, so both models are backtested over the same out-of-sample period for a like-for-like comparison.
+
+Two backtests are applied to the daily violation series (a violation occurs when realised loss exceeds the VaR forecast): the **Kupiec (1995)** unconditional coverage test, on whether the observed violation rate matches target, and the **Christoffersen (1998)** independence test, on whether violations cluster in time. Because the two statistics are asymptotically independent, their sum is distributed $\chi^2(2)$ under the joint null of correct coverage *and*
+independent violations; this joint statistic is reported alongside its components. Clustering is undesirable because it implies the model underestimates risk precisely during periods of market stress, the moments when accurate risk measurement matters most.
+
+```{r ewma-var, include=FALSE}
+r <- as.numeric(portfolio_ret)
+n <- length(r)
+sigma2 <- numeric(n)
+burn_in <- 30
+sigma2[1:burn_in] <- var(r[1:burn_in])
+for (t in (burn_in + 1):n) {
+  sigma2[t] <- lambda * sigma2[t - 1] + (1 - lambda) * r[t - 1]^2
+}
+sigma_ewma <- sqrt(sigma2)
+
+alpha_levels <- c(0.01, 0.05)
+z <- qnorm(alpha_levels)
+VaR_EWMA <- sapply(z, function(zz) -zz * sigma_ewma)
+colnames(VaR_EWMA) <- c("EWMA_99", "EWMA_95")
+```
+
+```{r hs-var, include=FALSE}
+VaR_HS <- matrix(NA, nrow = n, ncol = length(alpha_levels))
+colnames(VaR_HS) <- c("HS_99", "HS_95")
+for (t in (WE + 1):n) {
+  window <- r[(t - WE):(t - 1)]
+  VaR_HS[t, ] <- -quantile(window, probs = alpha_levels, type = 7)
+}
+```
+
+```{r combine-results, include=FALSE}
+results <- data.frame(
+  date    = index(portfolio_ret),
+  ret     = r,
+  EWMA_99 = VaR_EWMA[, "EWMA_99"],
+  EWMA_95 = VaR_EWMA[, "EWMA_95"],
+  HS_99   = VaR_HS[, "HS_99"],
+  HS_95   = VaR_HS[, "HS_95"]
+)
+bt <- results[(WE + 1):n, ]
+WT <- nrow(bt)   # testing window length
+```
+
+```{r backtest-functions, include=FALSE}
+violations <- function(ret, VaR) as.numeric(-ret > VaR)
+
+kupiec_LR <- function(ind, p) {
+  n <- length(ind); x <- sum(ind); pihat <- x / n
+  if (pihat == 0 || pihat == 1) return(NA_real_)
+  -2 * ((n - x) * log(1 - p) + x * log(p) -
+        (n - x) * log(1 - pihat) - x * log(pihat))
+}
+
+christoffersen_LR <- function(ind) {
+  n00 <- sum(head(ind, -1) == 0 & tail(ind, -1) == 0)
+  n01 <- sum(head(ind, -1) == 0 & tail(ind, -1) == 1)
+  n10 <- sum(head(ind, -1) == 1 & tail(ind, -1) == 0)
+  n11 <- sum(head(ind, -1) == 1 & tail(ind, -1) == 1)
+  p01 <- n01 / (n00 + n01)
+  p11 <- n11 / (n10 + n11)
+  p   <- (n01 + n11) / (n00 + n01 + n10 + n11)
+  if (any(is.nan(c(p01, p11))) || p01 <= 0 || p01 >= 1 || p11 <= 0 || p11 >= 1) {
+    return(NA_real_)
+  }
+  -2 * ((n00 + n10) * log(1 - p) + (n01 + n11) * log(p) -
+        n00 * log(1 - p01) - n01 * log(p01) -
+        n10 * log(1 - p11) - n11 * log(p11))
+}
+
+mc_band <- function(p, n, nsim = 1e6, probs = c(0.005, 0.995)) {
+  sims <- rbinom(nsim, size = n, prob = p)
+  as.numeric(quantile(sims / (n * p), probs = probs))
+}
+
+fmt_p <- function(p) {
+  ifelse(is.na(p), "--", ifelse(p < 0.001, "<0.001", sprintf("%.3f", p)))
+}
+```
+
+```{r run-backtests, include=FALSE}
+models     <- c("EWMA_99", "EWMA_95", "HS_99", "HS_95")
+p_by_model <- c(EWMA_99 = 0.01, EWMA_95 = 0.05, HS_99 = 0.01, HS_95 = 0.05)
+
+bt_res <- do.call(rbind, lapply(models, function(m) {
+  ind  <- violations(bt$ret, bt[[m]])
+  p    <- p_by_model[[m]]
+  x    <- sum(ind)
+  vr   <- (x / length(ind)) / p
+  luc  <- kupiec_LR(ind, p)
+  lind <- christoffersen_LR(ind)
+  ljt  <- luc + lind
+  band <- mc_band(p, length(ind))
+  data.frame(
+    model = m, p = p, violations = x, n = length(ind),
+    obs_rate = x / length(ind), vr = vr,
+    vr_lo = band[1], vr_hi = band[2],
+    lr_uc = luc,   p_uc = 1 - pchisq(luc,  df = 1),
+    lr_ind = lind, p_ind = 1 - pchisq(lind, df = 1),
+    lr_joint = ljt, p_joint = 1 - pchisq(ljt, df = 2),
+    stringsAsFactors = FALSE
+  )
+}))
+rownames(bt_res) <- bt_res$model
+
+VR   <- function(m) sprintf("%.3f", bt_res[m, "vr"])
+PUC  <- function(m) fmt_p(bt_res[m, "p_uc"])
+LRI  <- function(m) sprintf("%.2f", bt_res[m, "lr_ind"])
+PIND <- function(m) fmt_p(bt_res[m, "p_ind"])
+LRJ  <- function(m) sprintf("%.2f", bt_res[m, "lr_joint"])
+PJ   <- function(m) fmt_p(bt_res[m, "p_joint"])
+NV   <- function(m) bt_res[m, "violations"]
+BAND <- function(m) sprintf("[%.2f, %.2f]", bt_res[m, "vr_lo"], bt_res[m, "vr_hi"])
+```
+
+```{r ewma-clustering-check, include=FALSE}
+## Transition frequencies behind the EWMA-99 independence rejection
+ind_e99 <- violations(bt$ret, bt$EWMA_99)
+prev_e  <- head(ind_e99, -1)
+next_e  <- tail(ind_e99, -1)
+p11_e99 <- sum(prev_e == 1 & next_e == 1) / sum(prev_e == 1)
+p01_e99 <- sum(prev_e == 0 & next_e == 1) / sum(prev_e == 0)
+
+clustering_mechanism <- if (p11_e99 > 1.5 * p01_e99) {
+  paste0("A violation is followed by a further violation on ",
+         sprintf("%.1f", 100 * p11_e99), "% of occasions, against ",
+         sprintf("%.1f", 100 * p01_e99), "% following a quiet day. The asymmetry follows ",
+         "directly from the recursion. With $\\sigma_t^2 = 0.94\\sigma_{t-1}^2 + ",
+         "0.06\\,r_{t-1}^2$, a loss of four standard deviations raises the next day's ",
+         "variance to $0.94 + 0.06(16) = 1.90$ times its previous value, so the VaR forecast ",
+         "rises by roughly 38% in response to a shock that has just demonstrated the previous ",
+         "forecast was far too low. The model under-reacts on exactly the day it most needs ",
+         "to react.")
+} else ""
+```
+
+
+# Results
+
+Table 2 reports coverage results, Table 3 independence and the joint test.
+
+```{r coverage-table, include=TRUE}
+tab_cov <- data.frame(
+  Model           = bt_res$model,
+  `Exp. rate`     = sprintf("%.2f%%", 100 * bt_res$p),
+  `Viol.`         = bt_res$violations,
+  `Obs. rate`     = sprintf("%.2f%%", 100 * bt_res$obs_rate),
+  VR              = sprintf("%.3f", bt_res$vr),
+  `99% MC band`   = sprintf("[%.2f, %.2f]", bt_res$vr_lo, bt_res$vr_hi),
+  `LR (cov.)`     = sprintf("%.2f", bt_res$lr_uc),
+  p               = fmt_p(bt_res$p_uc),
+  check.names = FALSE
+)
+
+kable(tab_cov, row.names = FALSE, booktabs = TRUE, align = "lrrrrrrr",
+            caption = paste0("Coverage results. VR is observed violations over expected. ",
+                       "Testing window ", WT, " observations."))
+```
+
+```{r independence-table, include=TRUE}
+tab_ind <- data.frame(
+  Model         = bt_res$model,
+  `LR (ind.)`   = sprintf("%.2f", bt_res$lr_ind),
+  p             = fmt_p(bt_res$p_ind),
+  `LR (joint)`  = sprintf("%.2f", bt_res$lr_joint),
+  `p (joint)`   = fmt_p(bt_res$p_joint),
+  check.names = FALSE
+)
+
+kable(tab_ind, row.names = FALSE, booktabs = TRUE, align = "lrrrr",
+            caption = "Independence and joint tests.")
+```
+
+Figure 2 plots the daily portfolio loss against both 99% VaR estimates, with EWMA violations marked. The EWMA series is the conditional volatility path scaled by $-z_{0.01}$, so its movement also summarises the estimated volatility process.
+
+```{r backtest-plot, include=TRUE, fig.cap="99\\% VaR backtest: EWMA versus HS, with EWMA violations marked.", fig.height=2.6, out.width="85%"}
+loss  <- -bt$ret
+y_hi  <- max(c(loss, bt$EWMA_99, bt$HS_99)) * 1.35   # headroom so the legend clears the data
+
+plot(bt$date, loss, type = "l", col = "grey60",
+     ylim = c(min(loss), y_hi),
+     main = "99% VaR Backtest: EWMA vs HS",
+     xlab = "Date", ylab = "Loss (-return)")
+lines(bt$date, bt$HS_99,   col = "darkgreen", lwd = 1.4)
+lines(bt$date, bt$EWMA_99, col = "blue",      lwd = 1.4)
+
+viol <- violations(bt$ret, bt$EWMA_99) == 1
+points(bt$date[viol], loss[viol], col = "red", pch = 19, cex = 0.55)
+
+legend("top", ncol = 2, bty = "n", cex = 0.7,
+       legend = c("Loss", "EWMA 99% VaR", "HS 99% VaR", "EWMA violation"),
+       col = c("grey60", "blue", "darkgreen", "red"),
+       lty = c(1, 1, 1, NA), pch = c(NA, NA, NA, 19))
+```
+
+# Analysis and Recommendation
+
+Coverage and independence are distinct failure modes with distinct causes, and the coverage test alone identifies neither. HS-95 makes the point. Its violation ratio of
+`r VR("HS_95")` and Kupiec p-value of `r PUC("HS_95")` are indistinguishable from a correctly specified model, and the ratio sits well inside the Monte Carlo band of `r BAND("HS_95")`. Yet it records the largest independence statistic in the study, `r LRI("HS_95")`. The model delivers the right number of violations and places them in the wrong periods. Ranked on coverage it is the strongest of the four specifications; ranked on the joint statistic it is among the weakest.
+
+The two models fail through different mechanisms, and each mechanism determines its remedy.
+
+**EWMA fails through its conditional distribution.** At the 95% level its violation
+ratio is `r VR("EWMA_95")`, essentially exact. At the 99% level it is
+`r VR("EWMA_99")`, against a Monte Carlo band of `r BAND("EWMA_99")`, 
+`r NV("EWMA_99")` violations where the model permits roughly half that number. The
+Gaussian assumption holds at the 1.645 standard deviations the 95% level requires and
+breaks down by the 2.326 the 99% level requires, which is what a portfolio kurtosis of
+`r sprintf("%.2f", kurt_port)` against the Gaussian benchmark of 3 would predict, and
+what a skewness of `r sprintf("%.2f", skew_port)`, which thickens the left tail
+specifically, reinforces. The coverage failure is confined to the tail and it is a
+failure of the assumed distribution rather than of estimation: no choice of $\lambda$
+repairs it, because $\lambda$ governs how quickly the variance responds, not the shape
+of the tail conditional on that variance.
+
+Coverage is not the only EWMA failure at the 99% level, however. The independence
+statistic of `r LRI("EWMA_99")` also rejects, at p = `r PIND("EWMA_99")`.
+`r clustering_mechanism` Clustering of this kind is a property of the variance dynamics
+rather than of the innovation distribution, so a distributional correction addresses the
+coverage failure without necessarily addressing it. EWMA at 99% therefore fails on two
+counts, and the recommendation below should not be read as a single remedy for both.
+
+**HS fails through equal weighting.** Each of the `r WE` observations in the window
+carries weight $1/`r WE`$ irrespective of age, so the quantile estimate can respond to a
+change in volatility regime only as the window gradually fills with post-shock data.
+Through a volatility spike the estimate remains anchored to a calmer recent past, and
+violations arrive in bursts rather than independently, the mechanism behind
+independence statistics of `r LRI("HS_99")` at the 99% level and `r LRI("HS_95")` at the
+95% level. Those two figures are not directly comparable in magnitude: `r NV("HS_95")`
+violations identify the transition probabilities far more precisely than `r NV("HS_99")`
+do, so part of the gap between them reflects the power of the test rather than a stronger
+effect. The comparison that does carry weight is between EWMA-95 and HS-95, where the
+violation counts are close (`r NV("EWMA_95")` against `r NV("HS_95")`) and the
+independence statistics nonetheless differ by more than an order of magnitude
+(`r LRI("EWMA_95")` against `r LRI("HS_95")`). The same equal weighting produces the
+ghost effect in the opposite direction: a large loss drops out of the window abruptly
+after exactly `r WE` days, and VaR falls for reasons unconnected to current market
+conditions, visible in Figure 2 as a step down in the HS line roughly a year after
+each crisis.
+
+These mechanisms cut across the ranking that coverage alone would suggest. HS does
+dominate EWMA at the 99% level on coverage, `r VR("HS_99")` against `r VR("EWMA_99")`,
+but not on independence, `r LRI("HS_99")` against `r LRI("EWMA_99")`; both reject, so
+the comparison is between two failing models rather than between a passing and a failing
+one. The joint statistic makes this explicit: only EWMA-95 survives, with
+LR = `r LRJ("EWMA_95")` and p = `r PJ("EWMA_95")`, against `r LRJ("EWMA_99")`,
+`r LRJ("HS_99")` and `r LRJ("HS_95")` for the remaining three specifications. A single
+model passes a single confidence level, and it is the level that matters least for
+capital.
+
+The regulatory measure has since moved. Under the Fundamental Review of the Trading Book
+the internal-models capital charge is Expected Shortfall at 97.5%, not VaR at 99%, though
+VaR backtesting is retained as the approval gate. For Gaussian returns the two nearly
+coincide, and the wedge between them opens as the tail thickens, so a portfolio with
+kurtosis of `r sprintf("%.2f", kurt_port)` is penalised more heavily under ES than the
+results above imply.
+
+**Recommendation.** The two failures require different corrections, and they are complements rather than alternatives: neither model is repaired by the other's fix.
+
+The EWMA tail failure at 99% is a distributional mis-specification, so the correction is distributional: replace the Gaussian innovation with a Student-$t$, either as t-EWMA or GARCH-$t$. This targets the tail directly and leaves the accurate 95% behaviour intact. It does not
+address the clustering above, which needs a variance specification responding faster to large shocks than a fixed $\lambda$ of `r lambda` permits.
+
+The HS clustering failure is a weighting failure, so the correction is to reweight rather than to lengthen the window. Filtered Historical Simulation standardises returns by EWMA volatility, takes the quantile of the standardised residuals and rescales by current volatility. This preserves the non-parametric tail while restoring adaptivity, addressing both the clustering and the ghost effect with one change.
+
+Until these are implemented, neither model is adequate as the sole basis for capital at the 99% level. In the interim, report the joint statistic alongside the violation ratio in the monthly
+monitoring pack, and size any capital buffer against the clustering in Table 3 rather than the average violation rate, which Table 2
+shows can be correct while the model is failing. A firm running this suite today would see one green light, and it would be on the metric that matters least for capital.
+
+

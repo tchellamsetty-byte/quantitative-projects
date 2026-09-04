@@ -1,0 +1,336 @@
+---
+title: "Comparing Univariate GARCH-Type Models for S&P 500 Volatility"
+author: "Tushar Chellamsetty"
+date: " August 2026 "
+output:
+  pdf_document:
+    number_sections: true
+    toc: false
+    fig_caption: true
+  html_document:
+    toc: false
+    df_print: paged
+subtitle: A Quantitative Methods Project
+geometry: margin=1in
+fontsize: 12pt
+linkcolor: blue
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, warning = FALSE, message = FALSE,
+  fig.align = "center", fig.width = 7, fig.height = 4,
+  dev = "png", dpi = 200, fig.crop = FALSE
+)
+pkgs <- c("quantmod", "rugarch", "xts", "zoo", "FinTS", "tseries", "moments", "knitr")
+new_pkgs <- pkgs[!(pkgs %in% installed.packages()[, "Package"])]
+if (length(new_pkgs) > 0) install.packages(new_pkgs, repos = "https://cloud.r-project.org")
+invisible(lapply(pkgs, library, character.only = TRUE))
+set.seed(123)
+```
+
+# Introduction
+
+Volatility underpins option pricing, portfolio risk, value at risk and prudential regulation. Unlike returns it is unobserved, clusters over time, and responds more strongly to bad news than to good news of equal size. The ARCH model of Engle (1982) and its generalisation GARCH (Bollerslev, 1986) have been developed specifically to account for this phenomenon and are still the workhorse volatility models in practice and in academia.
+
+Many extensions followed. Integrated GARCH (iGARCH; Engle and Bollerslev, 1986) adds a restriction rather than relaxing one, imposing unit persistence. GJR-GARCH (Glosten, Jagannathan and Runkle, 1993) and Exponential GARCH (EGARCH; Nelson, 1991) let bad news raise volatility more than good news of equal size, the leverage effect of Black (1976). APARCH (Ding, Granger and Engle, 1993) estimates the power to which volatility is raised rather than fixing it at two, and nests Threshold GARCH (TGARCH; Zakoian, 1994) as a special case. Engle and Lee (1999) decompose variance into a slow permanent component and a fast transitory one, giving Component GARCH (csGARCH).
+
+In-sample horse races between GARCH specifications are well covered. Hansen and Lunde (2005) compared 330 ARCH-type models on exchange-rate and equity data and found little evidence that anything beats a simple GARCH(1,1) out of sample. This project does not attempt to fill a gap in that literature. Rather than ranking eight specifications by in-sample fit alone, it asks how stable their parameters are, and in particular the asymmetry term that separates the leverage models from GARCH(1,1). That is the question a practitioner faces when recalibrating on a rolling window. It is answered by re-estimating three representative specifications over five progressively shorter windows and reporting how the magnitude and significance of each coefficient change.
+
+The analysis uses 26 years of daily S&P 500 returns and eight specifications: GARCH(1,1) under normal and Student-t errors, iGARCH, GJR-GARCH, EGARCH, APARCH, TGARCH and csGARCH. These are compared on parameter significance, information criteria, likelihood-ratio tests between nested models, residual and asymmetry diagnostics, and fitted-volatility correlation.
+
+# Data
+
+These data are daily closing prices of the S&P 500 (`^GSPC`), obtained from Yahoo Finance using the `quantmod::getSymbols()` function, for the fixed sample from 1 January 2000 to 19 August 2026. The end date is fixed rather than set to the current date so that re-running the script reproduces exactly the numbers reported here. The series comfortably exceeds 4,000 observations and spans several volatility regimes: the dot-com crash, the 2008 financial crisis, the COVID crash in 2020, and the 2022 rate-hiking cycle.
+
+```{r data-download}
+ticker <- "^GSPC"
+sample_end <- "2026-08-19"
+gspc <- getSymbols(ticker, src = "yahoo", from = "2000-01-01", to = sample_end, auto.assign = FALSE)
+px <- Ad(gspc); colnames(px) <- "Adj.Close"; px <- na.omit(px)
+ret <- diff(log(px)) * 100; ret <- na.omit(ret); colnames(ret) <- "ret"
+stopifnot(nrow(ret) >= 4000)
+desc_stats <- data.frame(
+  N = nrow(ret), Mean = mean(ret), SD = sd(ret), Min = min(ret), Max = max(ret),
+  Skewness = skewness(as.numeric(ret)), Kurtosis = kurtosis(as.numeric(ret))
+)
+arch_test <- ArchTest(as.numeric(ret), lags = 12)
+write.csv(data.frame(Date = index(ret), Return = as.numeric(ret)),
+          "data_used.csv", row.names = FALSE)
+```
+
+Log returns are $r_t = 100 \times [\ln(P_t)-\ln(P_{t-1})]$, expressed in percent for numerically convenient GARCH parameter scales. After differencing, the series has `r nrow(ret)` observations.
+
+```{r desc-table}
+knitr::kable(round(desc_stats, 4), caption = "Descriptive statistics of daily S\\&P 500 log returns (\\%)")
+```
+
+Table 1 shows a small positive mean return (`r round(desc_stats$Mean,4)`% daily), a standard deviation of `r round(desc_stats$SD,3)`% (about `r round(desc_stats$SD*sqrt(252),1)`% annualised), with the extremes of `r round(desc_stats$Min,2)`% and `r round(desc_stats$Max,2)`% falling on 16 March 2020 and 13 October 2008 respectively. A negative skewness and large kurtosis (the classic "fat-tailed", "crash-prone" signature of daily equity returns) motivate the use of Student-t errors and asymmetric variance specifications below. 
+
+Figure 1 shows the index level and its returns. Returns display clear volatility clustering, most visibly around 2008 and 2020. An ARCH-LM test with 12 lags confirms this formally (statistic `r round(arch_test$statistic,1)`, p `r format.pval(arch_test$p.value, digits=3)`), rejecting no-ARCH-effects and justifying the models that follow.
+
+```{r fig-price-returns, fig.cap="S\\&P 500 adjusted close (top) and daily log returns in \\% (bottom)", fig.height=5.5}
+par(mfrow = c(2,1))
+plot(px, main = paste(ticker, "adjusted close"), col = "steelblue")
+plot(ret, main = paste(ticker, "daily log returns (%)"), col = "darkred")
+par(mfrow = c(1,1))
+```
+
+# Empirical analysis
+
+The models were estimated using the package rugarch (Ghalanos, 2024) which offers a common interface for specifying, fitting and forecasting GARCH-type models via maximum likelihood estimation and for post-estimation diagnostics. The eight specifications cover the principal extensions to GARCH(1,1). All have a constant mean, since return autocorrelation is economically negligible even where statistically detectable, and GARCH order (1,1), so differences come from the variance equation and the error distribution:
+
+```{r spec-list, echo=FALSE}
+spec_list <- list(
+  sGARCH_norm  = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "norm"),
+  sGARCH_std   = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std"),
+  iGARCH_std   = ugarchspec(variance.model = list(model = "iGARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std"),
+  gjrGARCH_std = ugarchspec(variance.model = list(model = "gjrGARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std"),
+  eGARCH_std   = ugarchspec(variance.model = list(model = "eGARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std"),
+  apARCH_std   = ugarchspec(variance.model = list(model = "apARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std"),
+  TGARCH_std   = ugarchspec(variance.model = list(model = "fGARCH", garchOrder = c(1,1),
+                                                   submodel = "TGARCH"),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std"),
+  csGARCH_std  = ugarchspec(variance.model = list(model = "csGARCH", garchOrder = c(1,1)),
+                             mean.model = list(armaOrder = c(0,0)), distribution.model = "std")
+)
+```
+
+**sGARCH** is the Bollerslev (1986) baseline, $\sigma_t^2=\omega+\alpha_1 r_{t-1}^2+\beta_1\sigma_{t-1}^2$, fitted under both normal and Student-t errors to isolate the effect of fat-tailed innovations. **iGARCH** imposes $\alpha_1+\beta_1=1$ (nested in, and testable against, sGARCH). **gjrGARCH** adds a leverage term $\gamma_1 I_{t-1}r_{t-1}^2$ ($I_{t-1}=1$ if $r_{t-1}<0$), nesting sGARCH at $\gamma_1=0$. **eGARCH** models log-variance with its own sign/size asymmetry, guaranteeing positivity without parameter constraints - a non-nested alternative asymmetry form. **apARCH** estimates the power $\delta$ of volatility rather than fixing it at two, together with asymmetry. **TGARCH** is the `fGARCH` submodel fixing $\delta=1$ with a threshold term. **csGARCH** splits variance into a near-unit-root permanent component and a fast-decaying transitory one, letting volatility revert to a time-varying long-run level.
+
+The distribution is held fixed at Student-t across seven specifications, so comparisons among them isolate the variance equation, while the normal/Student-t sGARCH pair isolates the distribution. Estimation uses the `rugarch` hybrid solver for numerical robustness, with Hessian-based standard errors from `ugarchfit()`.
+
+```{r fit-models, echo=FALSE, cache=TRUE}
+fit_list <- list()
+for (nm in names(spec_list)) {
+  fit_list[[nm]] <- tryCatch(ugarchfit(spec = spec_list[[nm]], data = ret, solver = "hybrid"),
+                              error = function(e) NULL)
+}
+fit_list <- fit_list[!sapply(fit_list, is.null)]
+```
+
+Comparison proceeds three ways: information criteria and log-likelihoods rank overall fit; LR tests formally test sGARCH-vs-gjrGARCH, sGARCH-vs-apARCH, and iGARCH-vs-sGARCH restrictions; and standardised residuals $\hat z_t=\hat r_t/\hat\sigma_t$ are tested via Ljung-Box (on $\hat z_t$ and $\hat z_t^2$), ARCH-LM, Jarque-Bera tests. Fitted volatilities and 22-day-ahead forecasts are then compared visually and via correlation.
+
+# Results
+
+```{r ic-table}
+ic_vals <- t(sapply(fit_list, function(f) as.numeric(infocriteria(f)[1:2, 1])))
+colnames(ic_vals) <- c("AIC", "BIC")
+loglik_vals <- vapply(fit_list, function(f) as.numeric(likelihood(f)), numeric(1))
+persist_vals <- vapply(fit_list, function(f) tryCatch(as.numeric(persistence(f))[1], error = function(e) NA_real_), numeric(1))
+ic_table <- data.frame(round(ic_vals, 4), LogLik = round(loglik_vals, 1), Persistence = round(persist_vals, 4))
+best_aic <- rownames(ic_table)[which.min(ic_table$AIC)]
+knitr::kable(ic_table, caption = "Information criteria, log-likelihood and persistence by model")
+```
+
+**Fit.** Table 2 shows every asymmetric model (gjrGARCH, eGARCH, apARCH, TGARCH) beating the symmetric sGARCH/iGARCH on all information criteria; `r best_aic` is best by AIC. Persistence is close to, but below, one everywhere except iGARCH (fixed at one by construction), so shocks are very long-lived but not permanent.
+
+```{r coef-table}
+coef_names <- c("omega", "alpha1", "beta1", "gamma1", "delta", "shape")
+mk <- function(label, vals) {
+  d <- data.frame(Model = label, t(vals), check.names = FALSE)
+  names(d) <- c("Model", coef_names); d
+}
+coef_table <- do.call(rbind, lapply(names(fit_list), function(nm) {
+  mc <- fit_list[[nm]]@fit$matcoef
+  est <- sapply(coef_names, function(cn) if (cn %in% rownames(mc)) sprintf("%.4f", mc[cn,1]) else "")
+  se  <- sapply(coef_names, function(cn) if (cn %in% rownames(mc) && !is.na(mc[cn,2])) sprintf("%.4f", mc[cn,2]) else "")
+  rbind(mk(nm, est), mk(paste0(nm, " (SE)"), se))
+}))
+knitr::kable(coef_table, caption = "Estimated coefficients, with standard errors in the row below each estimate; blank cells indicate a parameter not present in that specification")
+```
+
+Table 3 reports estimated coefficients and standard errors for every model, so the significance of each parameter, including the asymmetry term $\gamma_1$ and the apARCH power $\delta$, can be read directly. Where the point estimate is at least twice its standard error, the parameter is significant at approximately the 5% level.
+
+```{r delta-check}
+delta_ap <- if ("apARCH_std" %in% names(fit_list) && "delta" %in% rownames(fit_list$apARCH_std@fit$matcoef))
+  fit_list$apARCH_std@fit$matcoef["delta", 1:2] else c(NA, NA)
+```
+
+For apARCH the estimated power is $\hat\delta=$ `r round(delta_ap[1],3)` (SE `r round(delta_ap[2],3)`), giving a 95% interval of [`r round(delta_ap[1]-1.96*delta_ap[2],2)`, `r round(delta_ap[1]+1.96*delta_ap[2],2)`]. This contains one and excludes two, so for this series the recursion is better scaled in conditional *standard deviation* than in conditional *variance*. It also explains why TGARCH, which fixes $\delta=1$, matches apARCH's log-likelihood in Table 2 while estimating one fewer parameter.
+
+```{r lr-tests}
+lr_test <- function(fit_r, fit_f, name_r, name_f, df_override = NULL) {
+  ll_r <- as.numeric(likelihood(fit_r)); ll_f <- as.numeric(likelihood(fit_f))
+  df <- if (!is.null(df_override)) df_override else length(fit_f@fit$coef) - length(fit_r@fit$coef)
+  LR <- 2 * (ll_f - ll_r); pval <- 1 - pchisq(LR, df)
+  data.frame(Restricted = name_r, Full = name_f, df = df, LR = round(LR,2), p_value = signif(pval,4))
+}
+lr_results <- list()
+if (all(c("sGARCH_std","gjrGARCH_std") %in% names(fit_list)))
+  lr_results$a <- lr_test(fit_list$sGARCH_std, fit_list$gjrGARCH_std, "sGARCH","gjrGARCH")
+if (all(c("sGARCH_std","apARCH_std") %in% names(fit_list)))
+  lr_results$b <- lr_test(fit_list$sGARCH_std, fit_list$apARCH_std, "sGARCH","apARCH")
+if (all(c("iGARCH_std","sGARCH_std") %in% names(fit_list)))
+  # iGARCH imposes exactly one restriction on sGARCH (alpha1 + beta1 = 1), so df = 1
+  lr_results$c <- lr_test(fit_list$iGARCH_std, fit_list$sGARCH_std, "iGARCH","sGARCH", df_override = 1)
+lr_table <- do.call(rbind, lr_results); rownames(lr_table) <- NULL
+knitr::kable(lr_table, caption = "Likelihood-ratio tests between nested models")
+```
+
+**LR tests.** Table 4 rejects restricted sGARCH against both gjrGARCH and apARCH (p near zero) - the asymmetry extensions are statistically justified, not just flexibility. The iGARCH-vs-sGARCH test cannot reject unit persistence, since unrestricted $\hat\alpha_1+\hat\beta_1$ is already near one; imposing exact integration costs almost nothing in likelihood here, even though it is a testable restriction.
+
+```{r diag-table}
+residual_diagnostics <- function(fit, name) {
+  z <- residuals(fit, standardize = TRUE)
+  lb_z <- Box.test(z, lag = 10, type = "Ljung-Box"); lb_z2 <- Box.test(z^2, lag = 10, type = "Ljung-Box")
+  arch_lm <- ArchTest(as.numeric(z), lags = 10); jb <- jarque.bera.test(as.numeric(z))
+  data.frame(Model = name, LB_z_p = round(lb_z$p.value,4), LB_z2_p = round(lb_z2$p.value,4),
+             ArchLM_p = round(arch_lm$p.value,4), JB_p = signif(jb$p.value,4))
+}
+diag_table <- do.call(rbind, lapply(names(fit_list), function(nm) residual_diagnostics(fit_list[[nm]], nm)))
+rownames(diag_table) <- NULL
+
+asym <- c("gjrGARCH_std","eGARCH_std","apARCH_std","TGARCH_std")
+lb2_a <- diag_table$LB_z2_p[diag_table$Model %in% asym]
+lb2_s <- diag_table$LB_z2_p[!diag_table$Model %in% asym]
+
+knitr::kable(diag_table, caption = "Residual diagnostics (p-values)")
+```
+
+**Diagnostics.** The Ljung-Box test on the levels rejects for every specification, though in a sample of this size the test has power against departures too small to matter for a variance model. The squared-residual Ljung-Box and ARCH-LM tests are passed at 5% in every model. Jarque-Bera rejects normality of the standardised residuals throughout. For the Student-t specifications this is expected rather than damaging, since normality is not assumed; what matters for volatility forecasting is that the residuals are IID, which the Ljung-Box and ARCH-LM columns support. For sGARCH_norm the rejection is substantive, and is precisely why a Student-t specification is required for tail-sensitive applications such as VaR. The ordering within Table 5 is itself informative: the four asymmetric specifications record the highest squared-residual Ljung-Box p-values, from `r round(min(lb2_a),2)` to `r round(max(lb2_a),2)`, against `r round(min(lb2_s),2)` to `r round(max(lb2_s),2)` for the symmetric ones. Every specification absorbs volatility clustering, but those allowing an asymmetric response leave the least structure behind.
+
+
+```{r vol-compare, fig.cap="Conditional volatility (\\%) implied by each fitted model"}
+sigma_mat <- sapply(fit_list, function(f) as.numeric(sigma(f)))
+sigma_xts <- xts(sigma_mat, order.by = index(ret))
+matplot(index(sigma_xts), sigma_xts, type = "l", lty = 1, col = rainbow(ncol(sigma_xts)), xlab = "Date", ylab = "Cond. SD (%)")
+legend("topright", legend = colnames(sigma_mat), col = rainbow(ncol(sigma_xts)), lty = 1, cex = 0.55, ncol = 2)
+vol_corr <- cor(sigma_mat)
+```
+
+**Fitted volatility and forecasts.** Despite the different functional forms, the fitted series in Figure 2 are highly correlated, with a minimum pairwise correlation of `r round(min(vol_corr),3)`. They differ mainly in the steepness of the response to large negative shocks, so series used for VaR and pricing are very similar away from stress periods, even though Table 4 shows the specifications are far from statistically equivalent.
+
+```{r forecast-table}
+fc_list <- lapply(fit_list, function(f) ugarchforecast(f, n.ahead = 22))
+fc_sigma <- sapply(fc_list, function(fc) as.numeric(sigma(fc)))
+```
+
+```{r forecast-plot, fig.cap="22-trading-day-ahead volatility forecasts (\\%)"}
+matplot(1:22, fc_sigma, type = "l", lty = 1, col = rainbow(ncol(fc_sigma)), xlab = "Horizon (days)", ylab = "Forecast cond. SD (%)")
+legend("topleft", legend = colnames(fc_sigma), col = rainbow(ncol(fc_sigma)), lty = 1, cex = 0.55, ncol = 2)
+```
+
+Figure 3 shows forecasts reverting toward model-specific long-run levels at a speed set by persistence (Table 2): sGARCH and csGARCH, with persistence close to but below one, revert slowly, so small differences in estimated persistence compound into economically meaningful medium-horizon forecast gaps. iGARCH is a special case rather than merely the slowest: because $\alpha_1+\beta_1=1$ exactly, its unconditional variance $\omega/(1-\alpha_1-\beta_1)$ is undefined, so the model has no long-run level to revert to at all - its forecast trends rather than mean-reverts, which is why it sits apart from the other lines in Figure 3.
+
+```{r small-sample, cache=TRUE}
+windows <- c(4000, 2000, 1000, 500, 250); windows <- windows[windows <= nrow(ret)]
+small_sample_models <- c("sGARCH_std", "gjrGARCH_std", "eGARCH_std")
+small_sample_results <- list()
+for (w in windows) {
+  sub_ret <- tail(ret, w)
+  for (m in small_sample_models) {
+    key <- paste0(m, "_w", w)
+    f <- tryCatch(ugarchfit(spec = spec_list[[m]], data = sub_ret, solver = "hybrid"), error = function(e) NULL)
+    if (!is.null(f)) {
+      coefs <- f@fit$matcoef
+      a_row <- grep("^alpha1$", rownames(coefs)); b_row <- grep("^beta1$", rownames(coefs))
+      g_row <- grep("^gamma1$", rownames(coefs))
+      g_est <- if (length(g_row)) coefs[g_row,1] else NA_real_
+      g_se  <- if (length(g_row)) coefs[g_row,2] else NA_real_
+      small_sample_results[[key]] <- data.frame(
+        Model = m, Window = w,
+        alpha1 = if (length(a_row)) coefs[a_row,1] else NA,
+        alpha1_p = if (length(a_row)) coefs[a_row,4] else NA,
+        beta1 = if (length(b_row)) coefs[b_row,1] else NA,
+        gamma1 = g_est,
+        gamma1_p = if (length(g_row)) coefs[g_row,4] else NA_real_,
+        gamma1_CI_low  = g_est - 1.96 * g_se,
+        gamma1_CI_high = g_est + 1.96 * g_se,
+        Persistence = tryCatch(as.numeric(persistence(f))[1], error = function(e) NA_real_))
+    }
+  }
+}
+small_sample_table <- do.call(rbind, small_sample_results); rownames(small_sample_table) <- NULL
+w <- windows
+grab <- function(m, col) sapply(w, function(x) {
+  r <- small_sample_table[small_sample_table$Model == m & small_sample_table$Window == x, ]
+  if (nrow(r) == 0) NA_real_ else r[[col]]
+})
+gam <- function(m) sprintf("%.3f [%.3f, %.3f]",
+  grab(m, "gamma1"), grab(m, "gamma1_CI_low"), grab(m, "gamma1_CI_high"))
+
+ss_out <- data.frame(
+  Window = w,
+  `sGARCH alpha1 (p)` = sprintf("%.3f (%.3f)", grab("sGARCH_std","alpha1"),
+                                                grab("sGARCH_std","alpha1_p")),
+  `gjrGARCH gamma1`   = gam("gjrGARCH_std"),
+  `eGARCH gamma1`     = gam("eGARCH_std"),
+  check.names = FALSE)
+knitr::kable(ss_out, caption = "Parameter stability by estimation window; 95\\% confidence intervals in brackets")
+```
+
+```{r small-sample-plot, fig.cap="Persistence versus estimation window length", fig.height=3.5}
+plot(NULL, xlim = c(0.5, length(windows) + 0.5),
+     ylim = range(small_sample_table$Persistence, na.rm = TRUE),
+     xaxt = "n", xlab = "Estimation window (most recent N obs)", ylab = "Persistence")
+axis(1, at = seq_along(windows), labels = windows)
+cols2 <- c(sGARCH_std = "blue", gjrGARCH_std = "darkgreen", eGARCH_std = "red")
+for (m in small_sample_models) {
+  d <- small_sample_table[small_sample_table$Model == m, ]
+  d <- d[match(windows, d$Window), ]
+  lines(seq_along(windows), d$Persistence, col = cols2[m], lwd = 2, type = "b")
+}
+legend("bottomleft", legend = names(cols2), col = cols2, lwd = 2, cex = 0.8)
+```
+
+```{r ss-refs, include=FALSE}
+ss_get <- function(m, wnd, col) {
+  small_sample_table[[col]][small_sample_table$Model == m & small_sample_table$Window == wnd]
+}
+wmax <- max(windows); wmin <- min(windows); w2 <- sort(windows)[2]
+g_hi <- ss_get("gjrGARCH_std", wmax, "gamma1"); g_lo <- ss_get("gjrGARCH_std", wmin, "gamma1")
+ci_hi <- c(ss_get("gjrGARCH_std", wmax, "gamma1_CI_low"), ss_get("gjrGARCH_std", wmax, "gamma1_CI_high"))
+ci_lo <- c(ss_get("gjrGARCH_std", wmin, "gamma1_CI_low"), ss_get("gjrGARCH_std", wmin, "gamma1_CI_high"))
+e_ci_lo <- c(ss_get("eGARCH_std", wmin, "gamma1_CI_low"), ss_get("eGARCH_std", wmin, "gamma1_CI_high"))
+a_p2 <- ss_get("sGARCH_std", w2, "alpha1_p"); a_p1 <- ss_get("sGARCH_std", wmin, "alpha1_p")
+wid_hi <- diff(ci_hi); wid_lo <- diff(ci_lo)
+```
+
+**Small-sample properties.** The persistence of re-estimation of sGARCH, gjrGARCH and eGARCH on the latest 4,000 observations to 250 observations (Figure 4) is roughly the same up to about 500-1000 observations, and somewhat more volatile at 250 observations. The gjrGARCH leverage term is `r round(g_hi,3)` at `r format(wmax, big.mark=",")` observations, with a 95% interval of [`r round(ci_hi[1],3)`, `r round(ci_hi[2],3)`], and `r round(g_lo,3)` at `r wmin`, with an interval of [`r round(ci_lo[1],3)`, `r round(ci_lo[2],3)`]. The interval crosses zero at the shortest window and at no other. eGARCH's asymmetry term behaves the same way, with an interval of [`r round(e_ci_lo[1],3)`, `r round(e_ci_lo[2],3)`] at `r wmin` observations. A practitioner recalibrating on a year of data would therefore conclude that leverage is absent and set the term to zero, a conclusion that reverses at every longer window. The same pattern appears in sGARCH: $\alpha_1$ is significant at `r w2` observations (p = `r round(a_p2,3)`) but not at `r wmin` (p = `r round(a_p1,3)`).
+
+# Analysis
+
+The instability in Table 6 has a direct practical consequence. A risk function recalibrating on a rolling one-year window would find the leverage term insignificant and drop it, while the same specification estimated over the full sample identifies it unambiguously. Model choice would then be an artefact of window length rather than of the data. This is the empirical counterpart of a familiar constraint: richer specifications require more observations to estimate, so a short window pushes the modeller toward a simpler model at precisely the moment when adapting quickly to a changing regime matters most.
+
+This project does not compute value at risk, so no VaR comparison is offered. What Tables 2 to 4 support is an inference rather than a measurement: the asymmetry term is large and highly significant in every specification that estimates one freely, so a VaR figure built on a symmetric GARCH(1,1) will react more slowly to a negative shock than one built on an asymmetric specification. That is a reason to prefer an asymmetric model for downside risk measurement, not a quantified statement of how much a symmetric model would misstate risk. Table 5 sharpens where the choice matters. Every specification absorbs volatility clustering, with squared-residual Ljung-Box and ARCH-LM tests passing at 5% in every case, so for forecasting volatility itself the choice is close to immaterial. The models separate only in the tail, which is precisely where VaR and expected shortfall live.
+
+
+For financial regulation, the LR test in Table 4 fails to reject iGARCH's restriction that $\alpha_1+\beta_1=1$. This is not an esoteric detail. Setting $\omega=0$ in iGARCH gives exponentially weighted moving average (EWMA) volatility, which is the specification that RiskMetrics normalised, and that many institutions continue to use as a regulatory or internal risk baseline. The specification the industry already runs therefore cannot be excluded statistically, and it offers simplicity, auditability and a single tunable parameter. Statistical fit and fitness for regulatory purpose are different criteria, so the better-fitting asymmetric models in Table 2 are not automatically the better regulatory choice.
+
+# Conclusion
+
+This project estimated eight univariate GARCH-type specifications on 26 years of daily S&P 500 returns. The asymmetric models fit best on every information criterion, and the apARCH power parameter converges to one, so the recursion is better scaled in conditional standard deviation than in variance. The iGARCH restriction cannot be rejected, leaving the EWMA-style specification the industry already runs statistically defensible. Yet the fitted volatility series are almost indistinguishable, so specification choice bears on the response to large negative shocks rather than on the level of volatility.
+
+The contribution is Table 6. As the estimation window shrinks from 4,000 observations to 250, roughly one trading year, the confidence interval on the gjrGARCH leverage coefficient nearly triples in width, from `r sprintf("%.3f", wid_hi)` to `r sprintf("%.3f", wid_lo)`, and comes to contain zero; eGARCH behaves the same way. A practitioner recalibrating annually would conclude that leverage is absent, a conclusion that reverses at every longer window. The estimation window is therefore itself a modelling decision. A natural extension is an out-of-sample evaluation ranking models on predictive rather than in-sample performance.
+
+# Bibliography
+
+Black, F. (1976). Studies of stock price volatility changes. *Proceedings of the 1976 Meetings of the American Statistical Association, Business and Economic Statistics Section*, 177-181.
+
+Bollerslev, T. (1986). Generalized autoregressive conditional heteroskedasticity. *Journal of Econometrics*, 31(3), 307-327.
+
+Ding, Z., Granger, C. W. J., & Engle, R. F. (1993). A long memory property of stock market returns and a new model. *Journal of Empirical Finance*, 1(1), 83-106.
+
+Engle, R. F. (1982). Autoregressive conditional heteroscedasticity with estimates of the variance of United Kingdom inflation. *Econometrica*, 50(4), 987-1007.
+
+Engle, R. F., & Bollerslev, T. (1986). Modelling the persistence of conditional variances. *Econometric Reviews*, 5(1), 1-50.
+
+Engle, R. F., & Lee, G. J. (1999). A permanent and transitory component model of stock return volatility. In R. F. Engle & H. White (Eds.), *Cointegration, Causality, and Forecasting* (pp. 475-497). Oxford University Press.
+
+Ghalanos, A. (2024). *rugarch: Univariate GARCH Models*. R package documentation.
+
+Glosten, L. R., Jagannathan, R., & Runkle, D. E. (1993). On the relation between the expected value and the volatility of the nominal excess return on stocks. *Journal of Finance*, 48(5), 1779-1801.
+
+Hansen, P. R., & Lunde, A. (2005). A forecast comparison of volatility models: does anything beat a GARCH(1,1)? *Journal of Applied Econometrics*, 20(7), 873-889.
+
+Nelson, D. B. (1991). Conditional heteroskedasticity in asset returns: A new approach. *Econometrica*, 59(2), 347-370.
+
+Zakoian, J. M. (1994). Threshold heteroskedastic models. *Journal of Economic Dynamics and Control*, 18(5), 931-955.
