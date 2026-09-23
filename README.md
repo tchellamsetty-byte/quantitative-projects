@@ -22,7 +22,7 @@ covariance-inverse stability through condition-number analysis across 1, 5 and
 *R*
 
 **[Valuation Risk: Monte Carlo Engines and Variance Reduction](./monte-carlo-variance-reduction)**
-Cut Monte Carlo estimator variance by 88.7% on an out-of-the-money option using
+Cut Monte Carlo estimator variance by 88.7% on a European call option using
 importance sampling via a Girsanov change of measure. Benchmarked Euler-Maruyama,
 Milstein and Richardson extrapolation against theoretical convergence orders.
 *Python, group project*
