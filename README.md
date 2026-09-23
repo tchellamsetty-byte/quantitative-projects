@@ -1,4 +1,4 @@
-# Quantitative Risk Projects
+# Quantitative Projects
 
 Risk modelling work from my BSc Financial Mathematics and Statistics at LSE.
 Each folder contains the code and a short write-up covering the question, the
