@@ -29,7 +29,7 @@ Milstein and Richardson extrapolation against theoretical convergence orders.
 
 ## Tools
 
-R (rugarch, quantmod), Python (NumPy, pandas, Matplotlib)
+R (rugarch, quantmod), Python (NumPy, SciPy, Matplotlib)
 
 ## Note
 
